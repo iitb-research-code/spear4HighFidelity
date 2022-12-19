@@ -34,6 +34,20 @@ class _FunctionCaller:
             self.fault_counts[f.name] += 1
             return -1
 
+class _FunctionCallerContext:
+    def __init__(self, fault_tolerant: bool):
+        self.fault_tolerant = fault_tolerant
+        self.fault_counts: DefaultDict[str, int] = DefaultDict(int)
+
+    def __call__(self, f: LabelingFunction, x: DataPoint):
+        if not self.fault_tolerant:
+            return f(x)
+        try:
+            return f(x)
+        except Exception:
+            self.fault_counts[f.name] += 1
+            return -1
+
 
 class BaseLFApplier:
     """Base class for LF applier objects.
@@ -85,6 +99,32 @@ class BaseLFApplier:
 
 def apply_lfs_to_data_point(
     x: DataPoint, index: int, lfs: List[LabelingFunction], f_caller: _FunctionCaller
+) -> RowData:
+    """Label a single data point with a set of LFs
+
+    Args:
+        x (DataPoint): Data point to label
+        index (int): Index of the data point
+        lfs (List[LabelingFunction]): List of LFs to label ``x`` with
+        f_caller (_FunctionCaller): A ``_FunctionCaller`` to record failed LF executions
+
+    Returns:
+        RowData: A list of (data point index, LF index, label enum, confidence) tuples
+    """
+    labels = []
+    for j, lf in enumerate(lfs):
+        y, z = f_caller(lf, x)
+        if (y==ABSTAIN and z is None):
+            continue
+        if (y==ABSTAIN and z is not None):
+            labels.append((index, j, y, z))
+            continue    
+        assert(lf._label == y)
+        labels.append((index, j, y.value, z))
+    return labels
+
+def apply_lfs_to_data_point_context(
+    x: DataPoint, index: int, lfs: List[LabelingFunction], f_caller: _FunctionCallerContext
 ) -> RowData:
     """Label a single data point with a set of LFs
 
@@ -165,6 +205,68 @@ class LFApplier(BaseLFApplier):
         else:
             for i, x in enumerate(data_points):
                 labels.append(apply_lfs_to_data_point(x, i, self._lfs, f_caller))
+        
+        L,S = self._numpy_from_row_data(labels)
+        if return_meta:
+            return L, ApplierMetadata(f_caller.fault_counts)
+        return L,S
+
+class LFApplierContext(BaseLFApplier):
+    """LF applier for a list of data points (e.g. ``SimpleNamespace``) or a NumPy array.
+
+    Args:
+        lf_set (LFSet): Instace of LFset which has information of set of labeling functions(which is applied on data)
+    """ 
+
+    # Example:
+    #     >>> from labeling.lf import labeling_function
+    #     >>> @labeling_function()
+    #     ... def is_big_num(x,**kwargs):
+    #     ...     return 1 if x.num > 42 else 0
+    #     >>> applier = LFApplier([is_big_num])
+    #     >>> from types import SimpleNamespace
+    #     >>> applier.apply([SimpleNamespace(num=10), SimpleNamespace(num=100)])
+    #     array([[0], [1]])
+    #     >>> @labeling_function()
+    #     ... def is_big_num_np(x):
+    #     ...     return 1 if x[0] > 42 else 0
+    #     >>> applier = LFApplier([is_big_num_np])
+    #     >>> applier.apply(np.array([[10], [100]]))
+    #     array([[0], [1]])  
+
+    def apply(
+        self,
+        data_points: Union[DataPoints, np.ndarray],
+        # context: Union[DataPoints, np.ndarray],
+        progress_bar: bool = True,
+        fault_tolerant: bool = False,
+        return_meta: bool = False,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, ApplierMetadata]]:
+        """Label list of data points or a NumPy array with LFs.
+
+        Args:
+            data_points (Union[DataPoints, np.ndarray]): List of data points or NumPy array to be labeled by LFs
+            progress_bar (bool, optional): Display a progress bar?. Defaults to True.
+            fault_tolerant (bool, optional): Output ``-1`` if LF execution fails?. Defaults to False.
+            return_meta (bool, optional): Return metadata from apply call?. Defaults to False.
+
+        Returns:
+            Union[np.ndarray, Tuple[np.ndarray, ApplierMetadata]]:
+                np.ndarray:
+                    Matrix of labels emitted by LFs
+                ApplierMetadata:
+                    Metadata, such as fault counts, for the apply call
+        """        
+        labels = []
+        f_caller = _FunctionCaller(fault_tolerant)
+        if progress_bar:
+            with tqdm(total=len(data_points)) as pbar:
+                for i, x in enumerate(data_points):
+                    labels.append(apply_lfs_to_data_point_context(x, i, self._lfs, f_caller))
+                    pbar.update()
+        else:
+            for i, x in enumerate(data_points):
+                labels.append(apply_lfs_to_data_point_context(x, i, self._lfs, f_caller))
         
         L,S = self._numpy_from_row_data(labels)
         if return_meta:

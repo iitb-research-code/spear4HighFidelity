@@ -3,7 +3,7 @@ import enum, json
 from typing import Optional
 
 from ..lf_set import LFSet
-from ..apply import LFApplier
+from ..apply import LFApplier, LFApplierContext
 from ..analysis import LFAnalysis
 from ..lf import ABSTAIN 
 from ..utils import dump_to_pickle
@@ -151,6 +151,7 @@ class PreLabelsWithContext:
     Args:
         name (str): Name for this object.
         data (DataPoints): Datapoints.
+        context (DataPoints) : Datapoints. 
         gold_labels (Optional[DataPoints]): Labels for datapoints if available.
         rules (LFSet): Set of Rules to generate noisy labels for the dataset.
         exemplars (DataPoints): [description]
@@ -159,9 +160,14 @@ class PreLabelsWithContext:
         self,
         name: str,
         data: DataPoints,
+        # New: Context added
+        # context: DataPoints,
+        
         rules: LFSet,
         num_classes: int,
         labels_enum,
+        # New Optional Context
+        # context:Optional[DataPoints] = np.array([]),
         data_feats: Optional[DataPoints] = np.array([]),
         gold_labels: Optional[DataPoints] = np.array([]),
         exemplars: DataPoints=np.array([]),
@@ -170,6 +176,9 @@ class PreLabelsWithContext:
         """
         self.name = name
         self._data = data
+        # New Context added
+        # self._context = context
+
         self._rules = rules
         self._num_classes = num_classes
         self._labels_enum = labels_enum
@@ -186,6 +195,8 @@ class PreLabelsWithContext:
         
         lab_nams = set(item.name for item in self._labels_enum)
         assert 'ABSTAIN' not in lab_nams
+        
+        # TODO IS ASSERTION REQUIRED FOR CONTEXT DATA?
 
         assert (self._data_feats.shape[0]==0) or (self._data_feats.shape[0]==self._data.shape[0])
         assert (len(self._gold_labels)==self._data.shape[0]) or (self._gold_labels.shape[0]==0)
@@ -201,7 +212,7 @@ class PreLabelsWithContext:
             Tuple(DataPoints, DataPoints): Noisy Labels and Confidences
         """
         if self._L is None or self._L is None:
-            applier = LFApplier(lf_set = self._rules)
+            applier = LFApplierContext(lf_set = self._rules)
             L,S = applier.apply(self._data)
             self._L = L
             self._S = S
@@ -217,7 +228,7 @@ class PreLabelsWithContext:
             DataFrame: dataframe consisting of Ploarity, Coverage, Overlap, Conflicts, Empirical Acc
         """        
         if self._L is None or self._L is None:
-            applier = LFApplier(lf_set = self._rules)
+            applier = LFApplierContext(lf_set = self._rules)
             L,S = applier.apply(self._data)
             self._L = L
             self._S = S
@@ -256,7 +267,7 @@ class PreLabelsWithContext:
             filename = self.name+"_pickle.pkl"
         
         if (self._L is None or self._S is None):
-            applier = LFApplier(lf_set = self._rules)
+            applier = LFApplierContext(lf_set = self._rules)
             L,S = applier.apply(self._data)
             self._L = L
             self._S = S
