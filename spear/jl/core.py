@@ -396,12 +396,12 @@ class JL:
 			Else; the return value is predicted labels of numpy array of shape (num_instances, num_classes) through feature model. For a given model i,j-th element is the probability of ith instance being the 
 		  	jth class(the jth value when sorted in ascending order of values in Enum) using that model. It is suggested to use the probailities of feature model
 		'''
+
+
 		train = pickle.load(open(train, 'rb'))
 		val = pickle.load(open(dev, 'rb'))
 		test = pickle.load(open(test, 'rb'))
-		# print(train[1])
-		# print(val[1])
-		# print(test[1])
+		
 		all_labels = [item for sublist in train[1] for item in sublist] + [item for sublist in val[1] for item in sublist] + [item for sublist in test[1] for item in sublist]    
 		labels = list(set(all_labels))
 		num_labels = len(labels)
@@ -552,7 +552,10 @@ class JL:
 		
         ######################################################################
 		pad_token_label_id=CrossEntropyLoss().ignore_index
+		##
+		#TODO Make CordDataset to x
 		
+
 		train_dataset = CordDataset(train, tokenizer, labels, pad_token_label_id)
 		train_sampler = RandomSampler(train_dataset)
 		optimizer_gm = torch.optim.Adam([self.theta, self.pi], lr = lr_gm, weight_decay=0)	
@@ -580,46 +583,42 @@ class JL:
 
 		stopped_epoch = -1
 		stop_early_fm, stop_early_gm = [], []
+		supervised_criterion = torch.nn.CrossEntropyLoss()
 		# optimizer = AdamW(self.feature_model.parameters(), lr=5e-5)
 		with tqdm(total=n_epochs_) as pbar:
 			# self.feature_model.train()
 			global_step = 0
 			global_step_i = 0
 			for epoch in range(n_epochs_):
-				for batch in tqdm(train_dataloader, desc="Training"):
-					device = self.device
-					input_ids = batch[0].to(device)
-					bbox = batch[4].to(device)
-					attention_mask = batch[1].to(device)
-					token_type_ids = batch[2].to(device)
-					labels = batch[3].to(device)
-							# forward pass
-					outputs = self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids,
-									labels=labels)
-					losses = outputs.loss
+				dataloader_iterator = iter(train_dataloader)
 
-					# print loss every 100 steps
-					if global_step % 100 == 0:
-						print(f"Loss in feature model after {global_step} steps: {losses.item()}")
-					lossy=losses.item()
-
-					# backward pass to get the gradients 
-					losses.backward()
-					optimizer_fm.step()
-					optimizer_fm.zero_grad()
-					global_step += 1
-
-
-				supervised_criterion = torch.nn.CrossEntropyLoss()
 				for _, sample in enumerate(loader):
-					optimizer_gm.zero_grad()
+					try:
+						batch = next(dataloader_iterator)
+					except StopIteration:
+						dataloader_iterator = iter(train_dataloader)
+						batch = next(dataloader_iterator)
+
+					optimizer_fm.zero_grad()
+					optimizer_gm.zero_grad()					
 					for i in range(len(sample)):
 						sample[i] = sample[i].to(device = self.device)
 
 					supervised_indices = sample[4].nonzero().view(-1)
 					unsupervised_indices = (1-sample[4]).nonzero().squeeze()
 
-				
+					device = self.device
+					input_ids = batch[0].to(device)
+					bbox = batch[4].to(device)
+					attention_mask = batch[1].to(device)
+					token_type_ids = batch[2].to(device)
+					labels = batch[3].to(device)
+					
+					# forward pass
+					outputs = self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids,
+									labels=labels)
+					loss_1= outputs.loss
+
 					if (loss_func_mask[3] and len(supervised_indices) > 0):
 						loss_4 = log_likelihood_loss_supervised(self.theta, self.pi, sample[1][supervised_indices], sample[2][supervised_indices], sample[3][supervised_indices], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
 					else:
@@ -634,13 +633,15 @@ class JL:
 						prec_loss = precision_loss(self.theta, self.k, self.n_classes, qt_, self.device)
 					else:
 						prec_loss = 0
-					loss_ = loss_4 + loss_5 + prec_loss
+					loss_ = loss_1+ loss_4 + loss_5 + prec_loss
 					if global_step_i % 100 == 0:
+						print(f"Loss in feature model after {global_step} steps: {loss_1.item()}")
 						print(f"Loss in geneartive model after {global_step} steps: {(loss_)/3}")
 					if loss_ != 0:
 						loss_.backward()
+						optimizer_fm.step()
 						optimizer_gm.step()
-					loss=loss_+lossy
+					loss=loss_
 					global_step_i += 1
 					
 						
