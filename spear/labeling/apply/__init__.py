@@ -1,1 +1,1 @@
-from .core import LFApplier
+from .core import LFApplier, LFApplierContext
