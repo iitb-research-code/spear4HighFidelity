@@ -1,3 +1,35 @@
+#Running ipynb within visual studio and venv environment
+[Link](https://anbasile.github.io/posts/2017-06-25-jupyter-venv/)
+How to do it
+I assume that you are a tidy person: you have all your work sorted out in folders; one of these folders contains your very important project and it looks like this:
+
+$ ls
+
+project/
+├── data
+├── docs
+├── src
+└── test
+Inside this folder create a new virtual environment:
+
+python -m venv projectname
+Then activate it:
+
+source projectname/bin/activate
+Now, from inside the environment install ipykernel using pip:
+
+pip install ipykernel
+And now install a new kernel:
+
+ipython kernel install --user --name=projectname
+At this point, you can start jupyter, create a new notebook and select the kernel that lives inside your environment.
+
+
+#Downloading CORD dataset
+You can download the CORD dataset from https://github.com/clovaai/cord
+Add it to the data folder
+Run cord.ipynb file
+
 
 <!-- [![](https://tokei.rs/b1/github/decile-team/spear?category=code)](https://github.com/decile-team/spear) -->
 [![Lines of code](https://img.shields.io/tokei/lines/github/decile-team/spear)]()
