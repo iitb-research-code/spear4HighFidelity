@@ -241,21 +241,13 @@ class JL:
 	'''
 	Joint_Learning class:
 		[Note: from here on, feature model(fm) and feature-based classification model are used interchangeably. graphical model(gm) and CAGE algorithm terms are used interchangeably]
-
 		Loss function number | Calculated over | Loss function: (useful for loss_func_mask in fit_and_predict_proba and fit_and_predict functions)
-
 			1, L, Cross Entropy(prob_from_feature_model, true_labels)
-
 			2, U, Entropy(prob_from_feature_model)
-
 			3, U, Cross Entropy(prob_from_feature_model, prob_from_graphical_model)
-
 			4, L, Negative Log Likelihood
-
 			5, U, Negative Log Likelihood(marginalised over true labels)
-
 			6, L and U, KL Divergence(prob_feature_model, prob_graphical_model)
-
 			7, _,  Quality guide
 	
 	Args:
@@ -310,7 +302,6 @@ class JL:
 	def save_params(self, save_path):
 		'''
 			member function to save parameters of JL
-
 		Args:
 			save_path: path to pickle file to save parameters
 		'''
@@ -332,7 +323,6 @@ class JL:
 	def load_params(self, load_path):
 		'''
 			member function to load parameters to JL
-
 		Args:
 			load_path: path to pickle file to load parameters
 		'''
@@ -367,7 +357,7 @@ class JL:
 
 		
 
-	def fit_and_predict_proba(self, path_L, path_U, path_V, path_T,train,dev,test, loss_func_mask, batch_size, lr_fm, lr_gm, use_accuracy_score, path_log = None, return_gm = False, n_epochs = 100, start_len = 7,\
+	def fit_and_predict_proba(self, path_L, path_U, path_V, path_T,train,train_u,dev,test, loss_func_mask, batch_size, lr_fm, lr_gm, use_accuracy_score, path_log = None, return_gm = False, n_epochs = 100, start_len = 7,\
 	 stop_len = 10, is_qt = True, is_qc = True, qt = 0.9, qc = 0.85, metric_avg = 'binary'):
 		'''
 		Args:
@@ -390,7 +380,6 @@ class JL:
 			qt: Quality guide of shape (n_lfs,) of type numpy.ndarray OR a float. Values must be between 0 and 1. Default is 0.9
 			qc: Quality index of shape (n_lfs,) of type numpy.ndarray OR a float. Values must be between 0 and 1. Default is 0.85
 			metric_avg: Average metric to be used in calculating f1_score/precision/recall, default is 'binary'
-
 		Return:
 			If return_gm is True; the return value is two predicted labels of numpy array of shape (num_instances, num_classes), first one is through feature model, other one through graphical model.
 			Else; the return value is predicted labels of numpy array of shape (num_instances, num_classes) through feature model. For a given model i,j-th element is the probability of ith instance being the 
@@ -399,6 +388,7 @@ class JL:
 
 
 		train = pickle.load(open(train, 'rb'))
+		train_u = pickle.load(open(train_u, 'rb'))
 		val = pickle.load(open(dev, 'rb'))
 		test = pickle.load(open(test, 'rb'))
 		
@@ -554,7 +544,11 @@ class JL:
 		pad_token_label_id=CrossEntropyLoss().ignore_index
 		##
 		#TODO Make CordDataset to x
-		
+		train_u_dataset = CordDataset(train_u, tokenizer, labels, pad_token_label_id)
+		train_u_sampler = RandomSampler(train_u_dataset)
+		train_u_dataloader = DataLoader(train_u_dataset,
+						sampler=train_u_sampler,
+						batch_size=2)
 
 		train_dataset = CordDataset(train, tokenizer, labels, pad_token_label_id)
 		train_sampler = RandomSampler(train_dataset)
@@ -585,6 +579,13 @@ class JL:
 		stop_early_fm, stop_early_gm = [], []
 		supervised_criterion = torch.nn.CrossEntropyLoss()
 		# optimizer = AdamW(self.feature_model.parameters(), lr=5e-5)
+		for batchz in tqdm(train_u_dataloader):
+			device = self.device
+			input_idsz = batchz[0].to(device)
+			bboxz = batchz[4].to(device)
+			attention_maskz = batchz[1].to(device)
+			token_type_idsz = batchz[2].to(device)
+			labelsz = batchz[3].to(device)
 		with tqdm(total=n_epochs_) as pbar:
 			# self.feature_model.train()
 			global_step = 0
@@ -618,7 +619,19 @@ class JL:
 					outputs = self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids,
 									labels=labels)
 					loss_1= outputs.loss
+					
+					if(loss_func_mask[1]):
+						unsupervised_fm_probability = torch.nn.Softmax(dim = 1)(self.feature_model(input_ids=input_idsz, bbox=bboxz, attention_mask=attention_maskz, token_type_ids=token_type_idsz)[0])
+						loss_2 = entropy(unsupervised_fm_probability)
+					else:
+						loss_2 = 0
 
+					if(loss_func_mask[2]):
+						y_pred_unsupervised = predict_gm_labels(self.theta, self.pi, sample[2][unsupervised_indices], sample[3][unsupervised_indices], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+						loss_3 = supervised_criterion(self.feature_model(input_ids=input_idsz, bbox=bboxz, attention_mask=attention_maskz, token_type_ids=token_type_idsz,labels= torch.tensor(y_pred_unsupervised, device = self.device))[0])
+					else:
+						loss_3 = 0
+	
 					if (loss_func_mask[3] and len(supervised_indices) > 0):
 						loss_4 = log_likelihood_loss_supervised(self.theta, self.pi, sample[1][supervised_indices], sample[2][supervised_indices], sample[3][supervised_indices], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
 					else:
@@ -629,19 +642,32 @@ class JL:
 					else:
 						loss_5 = 0
 
+					if(loss_func_mask[5]):
+						if(len(supervised_indices) >0):
+							supervised_indices = supervised_indices.tolist()
+							probs_graphical = probability(self.theta, self.pi, torch.cat([sample[2][unsupervised_indices], sample[2][supervised_indices]]),\
+							torch.cat([sample[3][unsupervised_indices],sample[3][supervised_indices]]), self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+						else:
+							probs_graphical = probability(self.theta, self.pi,sample[2][unsupervised_indices],sample[3][unsupervised_indices],\
+								self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+						probs_graphical = (probs_graphical.t() / probs_graphical.sum(1)).t()
+						probs_fm = torch.nn.Softmax(dim = 1)(self.feature_model(input_ids=input_idsz, bbox=bboxz, attention_mask=attention_maskz, token_type_ids=token_type_idsz)[0])
+						loss_6 = kl_divergence(probs_fm, probs_graphical)
+					else:
+						loss_6 = 0
+
 					if(loss_func_mask[6]):
 						prec_loss = precision_loss(self.theta, self.k, self.n_classes, qt_, self.device)
 					else:
 						prec_loss = 0
-					loss_ = loss_1+ loss_4 + loss_5 + prec_loss
+					loss_ = loss_1 + loss_2 + loss_3 + loss_4 + loss_5 + loss_6 + prec_loss
 					if global_step_i % 100 == 0:
-						print(f"Loss in feature model after {global_step} steps: {loss_1.item()}")
-						print(f"Loss in geneartive model after {global_step} steps: {(loss_)/3}")
+						# print(f"Loss in feature model after {global_step} steps: {loss_1.item()}")
+						print(f"Loss in geneartive model after {global_step_i} steps: {(loss_)/3}")
 					if loss_ != 0:
 						loss_.backward()
 						optimizer_fm.step()
 						optimizer_gm.step()
-					loss=loss_
 					global_step_i += 1
 					
 						
@@ -981,7 +1007,6 @@ class JL:
 			qc: Quality index of shape (n_lfs,) of type numpy.ndarray OR a float. Values must be between 0 and 1. Default is 0.85
 			metric_avg: Average metric to be used in calculating f1_score/precision/recall, default is 'binary'
 			need_strings: If True, the output will be in the form of strings(class names). Else it is in the form of class values(given to classes in Enum). Default is False
-
 		Return:
 			If return_gm is True; the return value is two predicted labels of numpy array of shape (num_instances, ), first one is through feature model, other one through graphical model.
 			Else; the return value is predicted labels of numpy array of shape (num_instances,) through feature model. It is suggested to use the probailities of feature model
@@ -1000,7 +1025,6 @@ class JL:
 	def predict_gm_proba(self, path_test, qc = 0.85):
 		'''
 			Used to find the predicted labels based on the trained parameters of graphical model(CAGE)
-
 		Args:
 			path_test: Path to the pickle file containing test data set
 			qc: Quality index of shape (n_lfs,) of type numpy.ndarray OR a float. Values must be between 0 and 1. Default is 0.85
@@ -1032,7 +1056,6 @@ class JL:
 	def predict_fm_proba(self, x_test):
 		'''
 			Used to find the predicted labels based on the trained parameters of feature model
-
 		Args:
 			x_test: numpy array of shape (num_instances, num_features) containing data whose labels are to be predicted
 		
@@ -1099,7 +1122,6 @@ class JL:
 	def predict_gm(self, path_test, qc = 0.85, need_strings = False):
 		'''
 			Used to find the predicted labels based on the trained parameters of graphical model(CAGE)
-
 		Args:
 			path_test: Path to the pickle file containing test data set
 			qc: Quality index of shape (n_lfs,) of type numpy.ndarray OR a float. Values must be between 0 and 1. Default is 0.85
@@ -1115,16 +1137,12 @@ class JL:
 	def predict_fm(self, x_test, need_strings = False):
 		'''
 			Used to find the predicted labels based on the trained parameters of feature model
-
 		Args:
 			x_test: numpy array of shape (num_instances, num_features) containing data whose labels are to be predicted
 			need_strings: If True, the output will be in the form of strings(class names). Else it is in the form of class values(given to classes in Enum). Default is False
-
 		Return:
 			numpy.ndarray of shape (num_instances,) which are predicted labels. Elements are numbers/strings depending on need_strings attribute is false/true resp.
 			[Note: no aggregration/algorithm-running will be done using the current input]. It is suggested to use the probailities of feature model
 		'''
 		assert type(need_strings) == np.bool
 		return get_predictions(self.predict_fm_proba(x_test), self.class_map, self.class_dict, need_strings)
-
-
