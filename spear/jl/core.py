@@ -579,27 +579,26 @@ class JL:
 		stop_early_fm, stop_early_gm = [], []
 		supervised_criterion = torch.nn.CrossEntropyLoss()
 		# optimizer = AdamW(self.feature_model.parameters(), lr=5e-5)
-		for batchz in tqdm(train_u_dataloader):
-			device = self.device
-			input_idsz = batchz[0].to(device)
-			bboxz = batchz[4].to(device)
-			attention_maskz = batchz[1].to(device)
-			token_type_idsz = batchz[2].to(device)
-			labelsz = batchz[3].to(device)
+
+		
 		with tqdm(total=n_epochs_) as pbar:
 			# self.feature_model.train()
 			global_step = 0
 			global_step_i = 0
 			for epoch in range(n_epochs_):
 				dataloader_iterator = iter(train_dataloader)
-
+				dataloader_u_iterator = iter(train_u_dataloader)
+                
+                
 				for _, sample in enumerate(loader):
 					try:
 						batch = next(dataloader_iterator)
+						batchz = next(dataloader_u_iterator) 
 					except StopIteration:
 						dataloader_iterator = iter(train_dataloader)
 						batch = next(dataloader_iterator)
-
+						dataloader_u_iterator = iter(train_u_dataloader)
+						batchz = next(dataloader_u_iterator) 
 					optimizer_fm.zero_grad()
 					optimizer_gm.zero_grad()					
 					for i in range(len(sample)):
@@ -607,6 +606,7 @@ class JL:
 
 					supervised_indices = sample[4].nonzero().view(-1)
 					unsupervised_indices = (1-sample[4]).nonzero().squeeze()
+
 
 					device = self.device
 					input_ids = batch[0].to(device)
@@ -619,19 +619,30 @@ class JL:
 					outputs = self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids,
 									labels=labels)
 					loss_1= outputs.loss
-					
+                    
+					input_idsz = batchz[0].to(device)
+					bboxz = batchz[4].to(device)
+					attention_maskz = batchz[1].to(device)
+					token_type_idsz = batchz[2].to(device)
 					if(loss_func_mask[1]):
-						unsupervised_fm_probability = torch.nn.Softmax(dim = 1)(self.feature_model(input_ids=input_idsz, bbox=bboxz, attention_mask=attention_maskz, token_type_ids=token_type_idsz)[0])
+						q=self.feature_model(input_ids=input_idsz, bbox=bboxz, attention_mask=attention_maskz, token_type_ids=token_type_idsz)[0]
+						unsupervised_fm_probability = torch.nn.Softmax(dim = 1)(q)    
 						loss_2 = entropy(unsupervised_fm_probability)
 					else:
 						loss_2 = 0
 
 					if(loss_func_mask[2]):
 						y_pred_unsupervised = predict_gm_labels(self.theta, self.pi, sample[2][unsupervised_indices], sample[3][unsupervised_indices], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
-						loss_3 = supervised_criterion(self.feature_model(input_ids=input_idsz, bbox=bboxz, attention_mask=attention_maskz, token_type_ids=token_type_idsz,labels= torch.tensor(y_pred_unsupervised, device = self.device))[0])
+						q=q.cpu().detach().numpy()
+						flatten_list = []
+						for sub in q: 
+							for j in sub:
+								flatten_list.append(list(j))
+						q = torch.tensor(flatten_list,device = self.device)		 
+						loss_3 = supervised_criterion(q, torch.tensor(y_pred_unsupervised, device = self.device))
 					else:
 						loss_3 = 0
-	
+						
 					if (loss_func_mask[3] and len(supervised_indices) > 0):
 						loss_4 = log_likelihood_loss_supervised(self.theta, self.pi, sample[1][supervised_indices], sample[2][supervised_indices], sample[3][supervised_indices], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
 					else:
@@ -696,7 +707,7 @@ class JL:
 				#############################################################
 				
 				
-                ##################################################################################
+                ##################################################################################		  
 				###################################################################################
 				device = self.device
 				nb_test_steps=0
@@ -942,40 +953,28 @@ class JL:
 		nb_eval_steps = 0
 		preds = None
 		out_label_ids = None
+		#################################################################################################################################
+		q=0
+		for batch in (tqdm(train_u_dataloader)):
+			q=q+1
+		if(q==1):
+			input_ids=batch[0].to(device)
+			attention_mask=batch[1].to(device)
+			token_type_ids =batch[2].to(device)
+			labels=batch[3].to(device)
+			bbox =batch[4].to(device)
+		else:
+			input_ids=torch.cat((batch[0].to(device),input_ids))
+			attention_mask=torch.cat((batch[1].to(device),attention_mask))
+			token_type_ids =torch.cat((batch[2].to(device),token_type_ids))
+			labels=torch.cat((batch[3].to(device),labels))
+			bbox =torch.cat((batch[4].to(device),bbox))
 
+		#################################################################################################################################
 		# put model in evaluation mode
 		(self.feature_model).eval()
-		for batch in tqdm(train_dataloader, desc="training"):
-			with torch.no_grad():
-				input_ids = batch[0].to(device)
-				bbox = batch[4].to(device)
-				attention_mask = batch[1].to(device)
-				token_type_ids = batch[2].to(device)
-				labels = batch[3].to(device)
-
-				# forward pass
-				outputs = self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids,
-								labels=labels)
-				# get the loss and logits
-				tmp_eval_loss = outputs.loss
-				logits = outputs.logits
-
-				eval_loss += tmp_eval_loss.item()
-				nb_eval_steps += 1
-
-				# compute the predictions
-				if preds is None:
-					preds = logits.detach().cpu().numpy()
-					out_label_ids = labels.detach().cpu().numpy()
-				else:
-					preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
-					out_label_ids = np.append(
-						out_label_ids, labels.detach().cpu().numpy(), axis=0
-					)
-		print(self.theta, self.pi, torch.tensor(data_U[2], device = self.device).long(), torch.tensor(data_U[6], device = self.device).double(), \
-				self.k, self.n_classes, self.continuous_mask, qc_)
+		preds=torch.nn.Softmax(dim = 1)(self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids)[0])
 		# compute average evaluation loss
-		eval_loss = eval_loss / nb_eval_steps
 		(self.feature_model).train()
 		if return_gm:
 			return preds, (probability(self.theta_optimal, self.pi_optimal, torch.abs(torch.tensor(data_U[2], device = self.device).long()), z, \
