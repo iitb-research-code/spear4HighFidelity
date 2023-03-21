@@ -608,36 +608,37 @@ class JL:
 		stop_early_fm, stop_early_gm = [], []
 		# supervised_criterion = torch.nn.functional.cross_entropy
 		optimizer = AdamW(self.feature_model.parameters(), lr=5e-5)
-		i=0
-		for batch in test_dataloader:
-			i=i+1
-			if(i==1): 
-				l_testz=batch[5].to(self.device)
-			else:
-				l_testz=torch.cat([l_testz,batch[5].to(self.device)])
-		# print(l_test)
-		j=0
-		for batch in eval_dataloader:
-			j=j+1
-			if(j==1): 
-				l_validz=batch[5].to(self.device)
-			else:
-				l_validz=torch.cat([l_validz,batch[5].to(self.device)])	
-		# print(l_valid)
-		k=0
-		for batch in train_dataloader:
-			k=k+1
-			if(k==1): 
-				l_tra=batch[5].to(self.device)
-			else:
-				l_tra=torch.cat([l_tra,batch[5].to(self.device)])
-		q=0
-		for batch in train_dataloader:
-			q=q+1
-			if(q==1): 
-				l_tra_u=batch[5].to(self.device)
-			else:
-				l_tra_u=torch.cat([l_tra_u,batch[5].to(self.device)])				
+		# i=0
+		# for batch in test_dataloader:
+		# 	i=i+1
+		# 	if(i==1): 
+		# 		l_testz=batch[5].to(self.device)
+		# 	else:
+		# 		l_testz=torch.cat([l_testz,batch[5].to(self.device)])
+		# # print(l_test)
+		# j=0
+		# for batch in eval_dataloader:
+		# 	j=j+1
+		# 	if(j==1): 
+		# 		l_validz=batch[5].to(self.device)
+		# 	else:
+		# 		l_validz=torch.cat([l_validz,batch[5].to(self.device)])	
+		# # print(l_valid)
+		# k=0
+		# for batch in train_dataloader:
+		# 	k=k+1
+		# 	if(k==1): 
+		# 		l_tra=batch[5].to(self.device)
+		# 	else:
+		# 		l_tra=torch.cat([l_tra,batch[5].to(self.device)])
+		# q=0
+		# for batch in train_dataloader:
+		# 	q=q+1
+		# 	if(q==1): 
+		# 		l_tra_u=torch.cat([batch[5].to(self.device)[0]+batch[5].to(self.device)[1]])
+		# 	else:
+		# 		l_tra_u=torch.cat([batch[5].to(self.device)[0]+batch[5].to(self.device)[1]])
+		# 		l_u=torch.cat([l_tra_u,l_u])				
 
 		with tqdm(total=n_epochs_) as pbar:
 			# self.feature_model.train()
@@ -1124,17 +1125,22 @@ class JL:
 		# (self.feature_model).eval()
 		# preds=torch.nn.Softmax(dim = 1)(self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids)[0])
 		# compute average evaluation loss
-		
-		# put model in evaluation mode
+		i=0
 		(self.feature_model).eval()
 		for batch in tqdm(train_u_dataloader, desc="training"):
 			with torch.no_grad():
+				i=i+1
 				input_ids = batch[0].to(device)
 				bbox = batch[4].to(device)
 				attention_mask = batch[1].to(device)
 				token_type_ids = batch[2].to(device)
 				labels = batch[3].to(device)
-
+				if i==1:
+					l_tra_u=torch.cat([batch[5].to(self.device)[0]+batch[5].to(self.device)[1]])
+					l_u=l_tra_u
+				else:
+					l_tra_u=torch.cat([batch[5].to(self.device)[0]+batch[5].to(self.device)[1]])
+					l_u=torch.cat([l_u,l_tra_u])
 				# forward pass
 				outputs = self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids,
 								labels=labels)
@@ -1158,9 +1164,10 @@ class JL:
 		# compute average evaluation loss
 		eval_loss = eval_loss / nb_eval_steps
 		(self.feature_model).train()
-
+		s_u = torch.zeros(l_u.shape).to(device)
+		s_u[s_u < 0.001] = 0.001
 		if return_gm:
-			return preds, (probability(self.theta_optimal, self.pi_optimal, torch.abs(torch.tensor(data_U[2], device = self.device).long()), z, \
+			return preds, (probability(self.theta_optimal, self.pi_optimal, torch.abs(torch.tensor(l_u, device = self.device).long()), s_u, \
 				self.k, self.n_classes, self.continuous_mask, qc_, self.device)).cpu().detach().numpy()
 		else:
 			return preds
