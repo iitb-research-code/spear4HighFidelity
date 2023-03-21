@@ -28,6 +28,8 @@ tokenizer = LayoutLMTokenizer.from_pretrained("microsoft/layoutlm-base-uncased")
 import pickle 
 from torch.nn import CrossEntropyLoss
 max_seq_length = 512
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
 
 #[Note: 
 	#1. Loss function number, Calculated over, Loss function:
@@ -48,12 +50,13 @@ max_seq_length = 512
 	#	s: [num_instances, num_rules], continuous score
 #]
 class CordDataset(Dataset):
-    def __init__(self, examples, tokenizer, labels, pad_token_label_id):
+    def __init__(self, examples, tokenizer, labels, pad_token_label_id,n_lfs):
         features = convert_examples_to_featuresz(
             examples,
             labels,
             max_seq_length,
             tokenizer,
+	    	n_lfs,
             cls_token_at_end=False,
             # xlnet has a cls token at the end
             cls_token=tokenizer.cls_token,
@@ -66,6 +69,7 @@ class CordDataset(Dataset):
             pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
             pad_token_segment_id=0,
             pad_token_label_id=pad_token_label_id,
+            
         )
 
         self.features = features
@@ -83,6 +87,11 @@ class CordDataset(Dataset):
             [f.label_ids for f in features], dtype=torch.long
         )
         self.all_bboxes = torch.tensor([f.boxes for f in features], dtype=torch.long)
+        # print(features)		
+        # z=[f.L for f in features]
+        # z=torch.tensor(z,dtype=torch.long)
+        # print(z)
+        self.all_L = torch.tensor([f.L for f in features], dtype=torch.long)
 
     def __len__(self):
         return len(self.features)
@@ -94,6 +103,7 @@ class CordDataset(Dataset):
             self.all_segment_ids[index],
             self.all_label_ids[index],
             self.all_bboxes[index],
+			self.all_L[index],
         )
 
 class InputFeatures(object):
@@ -105,7 +115,8 @@ class InputFeatures(object):
         input_mask,
         segment_ids,
         label_ids,
-        boxes
+        boxes,
+        L
     ):
         assert (
             0 <= all(boxes) <= 1000
@@ -117,12 +128,15 @@ class InputFeatures(object):
         self.segment_ids = segment_ids
         self.label_ids = label_ids
         self.boxes = boxes
+        self.L = L
+
 
 def convert_examples_to_featuresz(
     examples,
     label_list,
     max_seq_length,
     tokenizer,
+    n_lfs,    
     cls_token_at_end=False,
     cls_token="[CLS]",
     cls_token_segment_id=1,
@@ -137,6 +151,8 @@ def convert_examples_to_featuresz(
     pad_token_label_id=-1,
     sequence_a_segment_id=0,
     mask_padding_with_zero=True,
+	# ABSTAIN=[None,None,None,None,None,None,None]
+	# ABSTAIN=[3,3,3,3,3,3,3]
 ):
     """ Loads a data file into a list of `InputBatch`s
         `cls_token_at_end` define the location of the CLS token:
@@ -144,7 +160,7 @@ def convert_examples_to_featuresz(
             - True (XLNet/GPT pattern): A + [SEP] + B + [SEP] + [CLS]
         `cls_token_segment_id` define the segment id associated to the CLS token (0 for BERT, 2 for XLNet)
     """
-
+    ABSTAIN=[-1]*n_lfs
     label_map = {label: i for i, label in enumerate(label_list)}
 
     features = []
@@ -153,12 +169,13 @@ def convert_examples_to_featuresz(
         words = examples[0]
         labels = examples[1]
         boxes = examples[2]
-
+        L=examples[3]
         tokens = []
         token_boxes = []
         label_ids = []
-        for word, label, box in zip(
-            words[i], labels[i], boxes[i]
+        token_L=[]
+        for word, label, box,L in zip(
+            words[i], labels[i], boxes[i],L[i]
         ):
             if len(word) < 1: # SKIP EMPTY WORD
               continue
@@ -168,6 +185,7 @@ def convert_examples_to_featuresz(
             # Use the real label id for the first token of the word, and padding ids for the remaining tokens
             label_ids.extend(
                 [label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
+            token_L.extend([L] * len(word_tokens))	
 
         # Account for [CLS] and [SEP] with "- 2" and with "- 3" for RoBERTa.
         special_tokens_count = 3 if sep_token_extra else 2
@@ -175,27 +193,32 @@ def convert_examples_to_featuresz(
             tokens = tokens[: (max_seq_length - special_tokens_count)]
             token_boxes = token_boxes[: (max_seq_length - special_tokens_count)]
             label_ids = label_ids[: (max_seq_length - special_tokens_count)]
-
+            token_L = token_L[: (max_seq_length - special_tokens_count)]
         tokens += [sep_token]
         token_boxes += [sep_token_box]
         label_ids += [pad_token_label_id]
+        token_L += [ABSTAIN]
         if sep_token_extra:
             # roberta uses an extra separator b/w pairs of sentences
             tokens += [sep_token]
             token_boxes += [sep_token_box]
             label_ids += [pad_token_label_id]
-        segment_ids = [sequence_a_segment_id] * len(tokens)
+            token_L += [ABSTAIN]
+        segment_ids = [sequence_a_segment_id] * len(tokens) 
 
         if cls_token_at_end:
             tokens += [cls_token]
             token_boxes += [cls_token_box]
             label_ids += [pad_token_label_id]
             segment_ids += [cls_token_segment_id]
+            token_L += [ABSTAIN]
+			
         else:
             tokens = [cls_token] + tokens
             token_boxes = [cls_token_box] + token_boxes
             label_ids = [pad_token_label_id] + label_ids
             segment_ids = [cls_token_segment_id] + segment_ids
+            token_L = [ABSTAIN] + token_L
 
         input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
@@ -213,18 +236,22 @@ def convert_examples_to_featuresz(
             segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
             label_ids = ([pad_token_label_id] * padding_length) + label_ids
             token_boxes = ([pad_token_box] * padding_length) + token_boxes
+            token_L += ([ABSTAIN] *  padding_length) + token_L
         else:
             input_ids += [pad_token] * padding_length
             input_mask += [0 if mask_padding_with_zero else 1] * padding_length
             segment_ids += [pad_token_segment_id] * padding_length
             label_ids += [pad_token_label_id] * padding_length
             token_boxes += [pad_token_box] * padding_length
+            token_L += [ABSTAIN] * padding_length
+			
 
         assert len(input_ids) == max_seq_length
         assert len(input_mask) == max_seq_length
         assert len(segment_ids) == max_seq_length
         assert len(label_ids) == max_seq_length
         assert len(token_boxes) == max_seq_length
+        # assert len(L) == max_seq_length
 
         features.append(
             InputFeatures(
@@ -233,6 +260,7 @@ def convert_examples_to_featuresz(
                 segment_ids=segment_ids,
                 label_ids=label_ids,
                 boxes=token_boxes,
+				L=token_L,
             )
         )
     return features
@@ -265,7 +293,7 @@ class JL:
 		assert feature_model == 'layoutlm'
 		
 		use_cuda = torch.cuda.is_available()
-		self.device = torch.device("cuda:0" if use_cuda else "cpu")
+		self.device = torch.device("cuda:1" if use_cuda else "cpu")
 		torch.backends.cudnn.benchmark = True
 		torch.set_default_dtype(torch.float64)
 
@@ -275,7 +303,7 @@ class JL:
 		self.n_classes = len(self.class_dict)
 
 		self.class_map = {value: index for index, value in enumerate(self.class_list)}
-		self.class_map[None] = self.n_classes
+		self.class_map[None] = -1
 		print(self.class_map)
 
 		self.n_lfs = int(n_lfs)
@@ -286,11 +314,11 @@ class JL:
 
 		self.pi = torch.ones((self.n_classes, self.n_lfs), device = self.device).double()
 		(self.pi).requires_grad = True
-		self.theta = torch.ones((self.n_classes, self.n_lfs), device = self.device).double()
+		self.theta = torch.ones((self.n_classes,self.n_lfs), device = self.device).double()
 		(self.theta).requires_grad = True
 
 		if self.feature_based_model == 'layoutlm':
-			self.feature_model = LayoutLMForTokenClassification.from_pretrained("microsoft/layoutlm-base-uncased", num_labels=3)
+			self.feature_model = LayoutLMForTokenClassification.from_pretrained("microsoft/layoutlm-base-uncased", num_labels=self.n_classes)
 			self.feature_model.to(device = self.device)
 		else:
 			print('Error: JL class - unrecognised feature_model in initialisation')
@@ -395,10 +423,9 @@ class JL:
 		all_labels = [item for sublist in train[1] for item in sublist] + [item for sublist in val[1] for item in sublist] + [item for sublist in test[1] for item in sublist]    
 		labels = list(set(all_labels))
 		num_labels = len(labels)
-		label_map = {i: label for i, label in enumerate(labels)}
+		label_map = {i: label for i, label in enumerate(labels)} 
 		# Use cross entropy ignore index as padding label id so that only real label ids contribute to the loss later
 		pad_token_label_id = CrossEntropyLoss().ignore_index
-		assert type(path_L) == str and type(path_V) == str and type(path_V) == str and type(path_T) == str
 		assert type(return_gm) == np.bool
 		assert (type(loss_func_mask) == list) and len(loss_func_mask) == 7
 		assert type(batch_size) == np.int or type(batch_size) == np.float
@@ -525,42 +552,44 @@ class JL:
 			qc_ = torch.tensor(np.mean(s_valid, axis = 0), device = self.device)
 
 		file = None
-		if path_log != None:
-			file = open(path_log, "a+")
-			file.write("JL log:\tn_classes: {}\tn_LFs: {}\tn_features: {}\tn_hidden: {}\tfeature_model:{}\tlr_fm: {}\tlr_gm:{}\tuse_accuracy_score: {}\tn_epochs:{}\tstart_len: {}\tstop_len:{}\n".format(\
-				self.n_classes, self.n_lfs, self.n_features, self.n_hidden, self.feature_based_model, lr_fm, lr_gm, use_accuracy_score, n_epochs, start_len, stop_len))
-		else:
-			print("JL log:\tn_classes: {}\tn_LFs: {}\tn_features: {}\tn_hidden: {}\tfeature_model:{}\tlr_fm: {}\tlr_gm:{}\tuse_accuracy_score: {}\tn_epochs:{}\tstart_len: {}\tstop_len:{}".format(\
-				self.n_classes, self.n_lfs, self.n_features, self.n_hidden, self.feature_based_model, lr_fm, lr_gm, use_accuracy_score, n_epochs, start_len, stop_len))
+		# if path_log != None:
+		# 	file = open(path_log, "a+")
+		# 	file.write("JL log:\tn_classes: {}\tn_LFs: {}\tn_features: {}\tn_hidden: {}\tfeature_model:{}\tlr_fm: {}\tlr_gm:{}\tuse_accuracy_score: {}\tn_epochs:{}\tstart_len: {}\tstop_len:{}\n".format(\
+		# 		self.n_classes, self.n_lfs, self.n_features, self.n_hidden, self.feature_based_model, lr_fm, lr_gm, use_accuracy_score, n_epochs, start_len, stop_len))
+		# else:
+		# 	print("JL log:\tn_classes: {}\tn_LFs: {}\tn_features: {}\tn_hidden: {}\tfeature_model:{}\tlr_fm: {}\tlr_gm:{}\tuse_accuracy_score: {}\tn_epochs:{}\tstart_len: {}\tstop_len:{}".format(\
+		# 		self.n_classes, self.n_lfs, self.n_features, self.n_hidden, self.feature_based_model, lr_fm, lr_gm, use_accuracy_score, n_epochs, start_len, stop_len))
         ############################################################################################################################################
 		
 
 
 		#############################################################################################################################################
 		#Algo starting
-		optimizer_fm = torch.optim.Adam(self.feature_model.parameters(), lr=lr_fm)
+		optimizer_fm = torch.optim.AdamW(self.feature_model.parameters(), lr=lr_fm, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.01, amsgrad=False, maximize=False, foreach=None, capturable=False)
+		# optimizer_fm = torch.optim.Adam(self.feature_model.parameters(), lr=lr_fm)
 # 		scheduler = torch.optim.lr_scheduler.StepLR(optimizer_fm, step_size=10, gamma=0.1)
         ######################################################################
 		pad_token_label_id=CrossEntropyLoss().ignore_index
 		##
+		# print(train_u[3])
 		#TODO Make CordDataset to x
-		train_u_dataset = CordDataset(train_u, tokenizer, labels, pad_token_label_id)
+		train_u_dataset = CordDataset(train_u, tokenizer, labels, pad_token_label_id,self.n_lfs)
 		train_u_sampler = RandomSampler(train_u_dataset)
 		train_u_dataloader = DataLoader(train_u_dataset,
 						sampler=train_u_sampler,
 						batch_size=2)
 
-		train_dataset = CordDataset(train, tokenizer, labels, pad_token_label_id)
+		train_dataset = CordDataset(train, tokenizer, labels, pad_token_label_id,self.n_lfs)
 		train_sampler = RandomSampler(train_dataset)
 		optimizer_gm = torch.optim.Adam([self.theta, self.pi], lr = lr_gm, weight_decay=0)	
-		dataset = TensorDataset(x_train, y_train, l, s, supervised_mask)
-		loader = DataLoader(dataset, batch_size = batch_size_, shuffle = True, drop_last = False, pin_memory = True)
+		# dataset = TensorDataset(x_train, y_train, l, s, supervised_mask)
+		# loader = DataLoader(dataset, batch_size = batch_size_, shuffle = True, drop_last = False, pin_memory = True)
 		#########################################################################
-		test_dataset = CordDataset(test, tokenizer, labels, pad_token_label_id)
+		test_dataset = CordDataset(test, tokenizer, labels, pad_token_label_id,self.n_lfs)
 		test_sampler = SequentialSampler(test_dataset)
 		test_dataloader = DataLoader(test_dataset,sampler=test_sampler,batch_size=2)
 		##########################################################################
-		eval_dataset = CordDataset(val, tokenizer, labels, pad_token_label_id)
+		eval_dataset = CordDataset(val, tokenizer, labels, pad_token_label_id,self.n_lfs)
 		eval_sampler = SequentialSampler(eval_dataset)
 		eval_dataloader = DataLoader(eval_dataset,sampler=eval_sampler,batch_size=2)
 		##########################################################################
@@ -577,97 +606,156 @@ class JL:
 
 		stopped_epoch = -1
 		stop_early_fm, stop_early_gm = [], []
-		supervised_criterion = torch.nn.CrossEntropyLoss()
-		# optimizer = AdamW(self.feature_model.parameters(), lr=5e-5)
+		# supervised_criterion = torch.nn.functional.cross_entropy
+		optimizer = AdamW(self.feature_model.parameters(), lr=5e-5)
+		i=0
+		for batch in test_dataloader:
+			i=i+1
+			if(i==1): 
+				l_testz=batch[5].to(self.device)
+			else:
+				l_testz=torch.cat([l_testz,batch[5].to(self.device)])
+		# print(l_test)
+		j=0
+		for batch in eval_dataloader:
+			j=j+1
+			if(j==1): 
+				l_validz=batch[5].to(self.device)
+			else:
+				l_validz=torch.cat([l_validz,batch[5].to(self.device)])	
+		# print(l_valid)
+		k=0
+		for batch in train_dataloader:
+			k=k+1
+			if(k==1): 
+				l_tra=batch[5].to(self.device)
+			else:
+				l_tra=torch.cat([l_tra,batch[5].to(self.device)])
+		q=0
+		for batch in train_dataloader:
+			q=q+1
+			if(q==1): 
+				l_tra_u=batch[5].to(self.device)
+			else:
+				l_tra_u=torch.cat([l_tra_u,batch[5].to(self.device)])				
 
-		
 		with tqdm(total=n_epochs_) as pbar:
 			# self.feature_model.train()
 			global_step = 0
 			global_step_i = 0
 			for epoch in range(n_epochs_):
 				dataloader_iterator = iter(train_dataloader)
-				dataloader_u_iterator = iter(train_u_dataloader)
-                
-				for _, sample in enumerate(loader):
+				for batchz in tqdm(train_u_dataloader):
 					try:
 						batch = next(dataloader_iterator)
-						batchz = next(dataloader_u_iterator) 
-					except StopIteration:
+					except StopIteration: 
 						dataloader_iterator = iter(train_dataloader)
-						batch = next(dataloader_iterator)
-						dataloader_u_iterator = iter(train_u_dataloader)
-						batchz = next(dataloader_u_iterator) 
+						batch = next(dataloader_iterator) 
 					optimizer_fm.zero_grad()
 					optimizer_gm.zero_grad()					
-					for i in range(len(sample)):
-						sample[i] = sample[i].to(device = self.device)
 
-					supervised_indices = sample[4].nonzero().view(-1)
-					unsupervised_indices = (1-sample[4]).nonzero().squeeze()
-
-
+					# supervised_indices = sample[4].nonzero().view(-1)
+					# unsupervised_indices = (1-sample[4]).nonzero().squeeze()
 					device = self.device
 					input_ids = batch[0].to(device)
 					bbox = batch[4].to(device)
 					attention_mask = batch[1].to(device)
 					token_type_ids = batch[2].to(device)
 					labels = batch[3].to(device)
-					
+					l_sz = batch[5].to(device)
+					# s_sz = l_sz
+					# s_sz[s_sz!=0] = 1
+					s_sz = torch.zeros(2,512,self.n_lfs).to(device)
+					s_sz[s_sz < 0.001] = 0.001
 					# forward pass
 					outputs = self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids,
 									labels=labels)
+					output=outputs[1]
 					loss_1= outputs.loss
-                    
+					# outputs = self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids,
+					# 				labels=labels)[1]
+					
 					input_idsz = batchz[0].to(device)
 					bboxz = batchz[4].to(device)
+					l=batchz[5].to(device)
+					# s=l
+					# s[s!=0] = 1
+					s = torch.zeros(2,512,self.n_lfs).to(device)
+					s[s < 0.001] = 0.001
 					attention_maskz = batchz[1].to(device)
 					token_type_idsz = batchz[2].to(device)
+					q=self.feature_model(input_ids=input_idsz, bbox=bboxz, attention_mask=attention_maskz, token_type_ids=token_type_idsz)[0]
 					if(loss_func_mask[1]):
-						q=self.feature_model(input_ids=input_idsz, bbox=bboxz, attention_mask=attention_maskz, token_type_ids=token_type_idsz)[0]
 						unsupervised_fm_probability = torch.nn.Softmax(dim = 1)(q)    
 						loss_2 = entropy(unsupervised_fm_probability)
 					else:
 						loss_2 = 0
-
+					
 					if(loss_func_mask[2]):
-						y_pred_unsupervised = predict_gm_labels(self.theta, self.pi, sample[2][unsupervised_indices], sample[3][unsupervised_indices], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+						y_pred_unsupervised=np.zeros((2,512,1))
+						for i in range(2):
+							y_pre = predict_gm_labels(self.theta, self.pi,l[i],s[i], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+							y_pred_unsupervised[i,:,0]=y_pre
+						y_pred_unsupervised=torch.cat([torch.tensor(y_pred_unsupervised[0]),torch.tensor(y_pred_unsupervised[1])])
+						y_pred_unsupervised=torch.squeeze(y_pred_unsupervised,1)
+						y_pred_unsupervised = y_pred_unsupervised.type(torch.LongTensor)	
 						q=q.cpu().detach().numpy()
-						flatten_list = []
-						for sub in q: 
-							for j in sub:
-								flatten_list.append(list(j))
-						q = torch.tensor(flatten_list,device = self.device)
-						# print(len(q))
-						# print(len(torch.tensor(y_pred_unsupervised, device = self.device)))		 
-						loss_3 = supervised_criterion(q[y_pred_unsupervised], torch.tensor(y_pred_unsupervised, device = self.device))
+						q=torch.tensor(q,device = self.device)
+						q_=torch.cat([q[0],q[1]]) 		 
+						loss_3 = torch.nn.functional.cross_entropy(q_, torch.tensor(y_pred_unsupervised, device = self.device))
 					else:
 						loss_3 = 0
 						
-					if (loss_func_mask[3] and len(supervised_indices) > 0):
-						loss_4 = log_likelihood_loss_supervised(self.theta, self.pi, sample[1][supervised_indices], sample[2][supervised_indices], sample[3][supervised_indices], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+					if (loss_func_mask[3]):
+						loss_arr=[]
+						for i in range(2):
+							loss4 =  log_likelihood_loss_supervised(self.theta, self.pi, x_train, l_sz[i],s_sz[i], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+							loss_arr.append(loss4)
+						loss_4=(loss_arr[0]+loss_arr[1])/2
 					else:
 						loss_4 = 0
-
+					loss_arr=[]
 					if(loss_func_mask[4]):
-						loss_5 = log_likelihood_loss(self.theta, self.pi, sample[2][unsupervised_indices], sample[3][unsupervised_indices], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+						for i in range(2):
+							loss5 = log_likelihood_loss(self.theta, self.pi,l[i],s[i], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+							loss_arr.append(loss5)
+						loss_5=(loss_arr[0]+loss_arr[1])/2
 					else:
 						loss_5 = 0
 
 					if(loss_func_mask[5]):
-						if(len(supervised_indices) >0):
-							supervised_indices = supervised_indices.tolist()
-							probs_graphical = probability(self.theta, self.pi, torch.cat([sample[2][unsupervised_indices], sample[2][supervised_indices]]),\
-							torch.cat([sample[3][unsupervised_indices],sample[3][supervised_indices]]), self.k, self.n_classes, self.continuous_mask, qc_, self.device)
-						else:
-							probs_graphical = probability(self.theta, self.pi,sample[2][unsupervised_indices],sample[3][unsupervised_indices],\
-								self.k, self.n_classes, self.continuous_mask, qc_, self.device)
-						probs_graphical = (probs_graphical.t() / probs_graphical.sum(1)).t()
-						probs_fm = torch.nn.Softmax(dim = 1)(self.feature_model(input_ids=input_idsz, bbox=bboxz, attention_mask=attention_maskz, token_type_ids=token_type_idsz)[0])
-						loss_6 = kl_divergence(probs_fm, probs_graphical)
+						# if(len(supervised_indices) >0):
+						# supervised_indices = supervised_indices.tolist()
+						# outputs=outputs.cpu().detach().numpy()
+						# outputs=torch.tensor(outputs,device = self.device)
+						loss1 = probability(self.theta, self.pi, l[0],s[0], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+						probs_graphical_1 = (loss1.t() / (loss1.sum(1)+1e-15)).t()
+						# fm_1=torch.cat([outputs[0],q[0]])
+						probs_fm_1 = torch.nn.Softmax(dim = 1)(q[0])
+						loss_6_1 = kl_divergence(probs_fm_1, probs_graphical_1)
+
+						loss2 = probability(self.theta, self.pi, l[1],s[1], self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+						probs_graphical_2 = (loss2.t() / (loss2.sum(1)+1e-15)).t()
+						# fm_2=torch.cat([outputs[1],q[1]])
+						probs_fm_2 = torch.nn.Softmax(dim = 1)(q[1])
+						loss_6_2 = kl_divergence(probs_fm_2, probs_graphical_2)
+						loss_6=(loss_6_1+loss_6_2)/2	
 					else:
 						loss_6 = 0
-
+	# loss1 = probability(self.theta, self.pi, torch.cat([l_sz[0], l[0]]),torch.cat([s_sz[0],s[0]]), self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+	# 					probs_graphical_1 = (loss1.t() / loss1.sum(1)).t()
+	# 					fm_1=torch.cat([outputs[0],q[0]])
+	# 					probs_fm_1 = torch.nn.Softmax(dim = 1)(fm_1)
+	# 					loss_6_1 = kl_divergence(probs_fm_1, probs_graphical_1)
+						
+	# 					loss2 = probability(self.theta, self.pi, torch.cat([l_sz[1], l[1]]),torch.cat([s_sz[1],s[1]]), self.k, self.n_classes, self.continuous_mask, qc_, self.device)
+	# 					probs_graphical_2 = (loss2.t() / loss2.sum(1)).t()
+	# 					fm_2=torch.cat([outputs[1],q[1]])
+	# 					probs_fm_2 = torch.nn.Softmax(dim = 1)(fm_2)
+	# 					loss_6_2 = kl_divergence(probs_fm_2, probs_graphical_2)
+	# 					loss_6=(loss_6_1+loss_6_2)/2	
+	# 				else:
+	# 					loss_6 = 0
 					if(loss_func_mask[6]):
 						prec_loss = precision_loss(self.theta, self.k, self.n_classes, qt_, self.device)
 					else:
@@ -675,19 +763,74 @@ class JL:
 					loss_ = loss_1 + loss_2 + loss_3 + loss_4 + loss_5 + loss_6 + prec_loss
 					if global_step_i % 100 == 0:
 						# print(f"Loss in feature model after {global_step} steps: {loss_1.item()}")
+						print(f"Loss_1 after {global_step_i} steps: {loss_1}")
+						print(f"Loss_2 after {global_step_i} steps: {loss_2}")
+						print(f"Loss_3 after {global_step_i} steps: {loss_3}")
+						print(f"Loss_4 after {global_step_i} steps: {loss_4}")
+						print(f"Loss_5 after {global_step_i} steps: {loss_5}")
+						print(f"Loss_6 after {global_step_i} steps: {loss_6}")
+						print(f"Loss_7 after {global_step_i} steps: {prec_loss}")
 						print(f"Loss in geneartive model after {global_step_i} steps: {loss_}")
+						if path_log != None:
+							file = open(path_log, "a+")
+							file.write("Loss_1 after: {}\t steps: {}\n".format(global_step_i, loss_1))
+							file.write("Loss_2 after: {}\t steps: {}\n".format(global_step_i, loss_2))
+							file.write("Loss_3 after: {}\t steps: {}\n".format(global_step_i, loss_3))
+							file.write("Loss_4 after: {}\t steps: {}\n".format(global_step_i, loss_4))
+							file.write("Loss_5 after: {}\t steps: {}\n".format(global_step_i, loss_5))
+							file.write("Loss_6 after: {}\t steps: {}\n".format(global_step_i, loss_6))
+							file.write("Loss_7 after: {}\t steps: {}\n".format(global_step_i, prec_loss))
+							file.write("total_Loss after: {}\t steps: {}\n".format(global_step_i, loss_))
+							file.close() 
 					if loss_ != 0:
+						writer.add_scalar("Loss/loss_1", loss_1, epoch)
+						writer.add_scalar("Loss/loss_2", loss_2, epoch)
+						writer.add_scalar("Loss/loss_3", loss_3, epoch)
+						writer.add_scalar("Loss/loss_4", loss_4, epoch)
+						writer.add_scalar("Loss/loss_5", loss_5, epoch)
+						writer.add_scalar("Loss/prec_loss", prec_loss, epoch)
+						writer.add_scalar("Loss/total_loss", loss_, epoch)
 						loss_.backward()
 						optimizer_fm.step()
 						optimizer_gm.step()
-# 						scheduler.step()
+	# 						scheduler.step()
 					global_step_i += 1
-					
-						
-							 
+				
+				############################################################################################################################
+			
+
+
+				#################################################################################### 
+				# s_test = torch.zeros(51200,7).to(device)
+				# s_test[s_test < 0.001] = 0.001
+				# s_valid = torch.zeros(51200,7).to(device)
+				# s_valid[s_valid < 0.001] = 0.001
+
+				
+				###################################################################################
+				
+
+
+
+                ###########################################################################################################################
+
+				# i=0	
+				# for i in range(99):
+				# 	l_test=torch.cat([l_testz[i],l_testz[i+1]])
+
+				# i=0	
+				# for i in range(99):
+				# 	l_test=torch.cat([l_validz[i],l_validz[i+1]])	
+
+
+				############################################################################################################################			 
                 #gm test
 				y_pred = predict_gm_labels(self.theta, self.pi, l_test.to(device = self.device), s_test.to(device = self.device), self.k, self.n_classes, self.continuous_mask, qc_, self.device)
 				print(y_pred)
+				from sklearn.metrics import accuracy_score
+				from sklearn.metrics import f1_score
+				from sklearn.metrics import precision_score as prec_score
+				from sklearn.metrics import recall_score as recall_score
 				if use_accuracy_score:
 					gm_test_acc = accuracy_score(y_test, y_pred)
 				else:
@@ -702,15 +845,9 @@ class JL:
 				else:
 					gm_valid_acc = f1_score(y_valid, y_pred, average = metric_avg)
 				
-				(self.feature_model).eval()
-
-				#fm test
+								#fm test
 				#############################################################
 				
-				
-                ##################################################################################		  
-				###################################################################################
-				device = self.device
 				nb_test_steps=0
 				test_loss=0.0
 				preds=None
@@ -721,7 +858,7 @@ class JL:
 						attention_mask = batch[1].to(device)
 						token_type_ids = batch[2].to(device)
 						labels = batch[3].to(device)
-
+						z=batch[5].to(device)
 						# forward pass
 						outputs = self.feature_model(input_ids=input_ids, bbox=bbox, attention_mask=attention_mask, token_type_ids=token_type_ids,
 										labels=labels)
@@ -748,17 +885,12 @@ class JL:
 
 				out_label_list = [[] for _ in range(out_label_ids.shape[0])]
 				preds_list = [[] for _ in range(out_label_ids.shape[0])]
-
+				# label_map = {i: label for i, label in enumerate(labels)}
 				for i in range(out_label_ids.shape[0]):
 					for j in range(out_label_ids.shape[1]):
 						if out_label_ids[i, j] != pad_token_label_id:
 							out_label_list[i].append(label_map[out_label_ids[i][j]])
 							preds_list[i].append(label_map[preds[i][j]])
-
-				
-               
-
-
 				####################################################################################
 				from seqeval.metrics import classification_report,precision_score
 				from seqeval.metrics import f1_score as f1
@@ -773,8 +905,12 @@ class JL:
 				print("test accuracy -",fm_test_acc)
 				print("precision accuracy -",fm_test_prec)
 				print("recall accuracy -",fm_test_recall)
-		    
-
+				writer.add_scalar('Accuracy/test',fm_test_acc , epoch)
+				if path_log != None:
+					file = open(path_log, "a+")
+					file.write("epoch: {}\tfm_test_acc: {}\n".format(epoch, fm_test_acc))
+					file.close() 
+                ##################################################################################		  
 				#fm validation
                 ###################################################################################################
                 ##################################################################################
@@ -838,16 +974,21 @@ class JL:
 					print("fm_validation",fm_valid_acc)
 					print("precision val accuracy -",fm_val_prec)
 					print("recall val accuracy -",fm_val_recall)
+					writer.add_scalar('Accuracy/validation',fm_valid_acc , epoch)
+				if path_log != None:
+					file = open(path_log, "a+")
+					file.write("epoch: {}\tfm_val_acc: {}\n".format(epoch, fm_valid_acc))
+				file.close() 
 				(self.feature_model).train()
 
-				if path_log != None:
-					file.write("{}: Epoch: {}\tgm_valid_score: {}\tfm_valid_score: {}\n".format(score_used, epoch, gm_valid_acc, fm_valid_acc))
-					if epoch % 5 == 0:
-						file.write("{}: Epoch: {}\tgm_test_score: {}\tfm_test_score: {}\n".format(score_used, epoch, gm_test_acc, fm_test_acc))
-				else:
-					print("{}: Epoch: {}\tgm_valid_score: {}\tfm_valid_score: {}".format(score_used, epoch, gm_valid_acc, fm_valid_acc))
-					if epoch % 5 == 0:
-						print("{}: Epoch: {}\tgm_test_score: {}\tfm_test_score: {}".format(score_used, epoch, gm_test_acc, fm_test_acc))
+				# if path_log != None:
+				# 	file.write("{}: Epoch: {}\tgm_valid_score: {}\tfm_valid_score: {}\n".format(score_used, epoch, gm_valid_acc, fm_valid_acc))
+				# 	if epoch % 5 == 0:
+				# 		file.write("{}: Epoch: {}\tgm_test_score: {}\tfm_test_score: {}\n".format(score_used, epoch, gm_test_acc, fm_test_acc))
+				# else:
+				# 	print("{}: Epoch: {}\tgm_valid_score: {}\tfm_valid_score: {}".format(score_used, epoch, gm_valid_acc, fm_valid_acc))
+				# 	if epoch % 5 == 0:
+				# 		print("{}: Epoch: {}\tgm_test_score: {}\tfm_test_score: {}".format(score_used, epoch, gm_test_acc, fm_test_acc))
                 # epoch > start_len_ 
 				if gm_valid_acc >= best_score_gm_val and gm_valid_acc >= best_score_fm_val:
 					if gm_valid_acc == best_score_gm_val or gm_valid_acc == best_score_fm_val:
@@ -929,7 +1070,7 @@ class JL:
 
 				pbar.update()
 				#epoch for loop ended
-
+		writer.close()
 		if stopped_epoch == -1:
 			print('best_epoch: {}'.format(best_epoch))
 		else:
@@ -952,9 +1093,7 @@ class JL:
         
 		# below prints and writes to file, the final test accuracies
 		print("final_gm_test_acc: {}\tfinal_fm_test_acc: {}\n".format(gm_test_acc, fm_test_acc))
-		if path_log != None:
-			file.write("final_test_acc: {}\tfinal_fm_test_acc: {}\n".format(gm_test_acc, fm_test_acc))
-			file.close()
+		
 
 		(self.feature_model).load_state_dict(self.fm_optimal_params)
 		
@@ -988,7 +1127,7 @@ class JL:
 		
 		# put model in evaluation mode
 		(self.feature_model).eval()
-		for batch in tqdm(train_dataloader, desc="training"):
+		for batch in tqdm(train_u_dataloader, desc="training"):
 			with torch.no_grad():
 				input_ids = batch[0].to(device)
 				bbox = batch[4].to(device)
@@ -1015,9 +1154,11 @@ class JL:
 					out_label_ids = np.append(
 						out_label_ids, labels.detach().cpu().numpy(), axis=0
 					)
+
 		# compute average evaluation loss
 		eval_loss = eval_loss / nb_eval_steps
 		(self.feature_model).train()
+
 		if return_gm:
 			return preds, (probability(self.theta_optimal, self.pi_optimal, torch.abs(torch.tensor(data_U[2], device = self.device).long()), z, \
 				self.k, self.n_classes, self.continuous_mask, qc_, self.device)).cpu().detach().numpy()
