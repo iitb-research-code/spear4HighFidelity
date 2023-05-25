@@ -245,7 +245,7 @@ def convert_examples_to_featuresz(
             token_boxes += [pad_token_box] * padding_length
             token_L += [ABSTAIN] * padding_length
 			
-
+        label_ids=label_ids[:512]		
         assert len(input_ids) == max_seq_length
         assert len(input_mask) == max_seq_length
         assert len(segment_ids) == max_seq_length
@@ -293,7 +293,7 @@ class JL:
 		assert feature_model == 'layoutlm'
 		
 		use_cuda = torch.cuda.is_available()
-		self.device = torch.device("cuda:1" if use_cuda else "cpu")
+		self.device = torch.device("cuda:0" if use_cuda else "cpu")
 		torch.backends.cudnn.benchmark = True
 		torch.set_default_dtype(torch.float64)
 
