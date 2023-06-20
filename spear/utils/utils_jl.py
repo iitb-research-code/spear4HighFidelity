@@ -51,7 +51,9 @@ def kl_divergence(probs_p, probs_q):
 	Return:
 		a real value, the KL divergence of given probabilities
 	'''
-	return (probs_p * log(probs_p / probs_q)).sum() / probs_p.shape[0]
+	#adding episilon so that nan issue is not faced
+	
+	return (probs_p * log(probs_p / (probs_q+1e-15))).mean(dim=0).sum()
 
 
 def find_indices(data, data_sub):
